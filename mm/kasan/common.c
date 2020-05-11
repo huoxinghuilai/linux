@@ -15,7 +15,6 @@
  */
 
 #include <linux/export.h>
-#include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/kasan.h>
 #include <linux/kernel.h>
@@ -41,28 +40,6 @@
 
 #include "kasan.h"
 #include "../slab.h"
-
-static inline int in_irqentry_text(unsigned long ptr)
-{
-	return (ptr >= (unsigned long)&__irqentry_text_start &&
-		ptr < (unsigned long)&__irqentry_text_end) ||
-		(ptr >= (unsigned long)&__softirqentry_text_start &&
-		 ptr < (unsigned long)&__softirqentry_text_end);
-}
-
-static inline unsigned int filter_irq_stacks(unsigned long *entries,
-					     unsigned int nr_entries)
-{
-	unsigned int i;
-
-	for (i = 0; i < nr_entries; i++) {
-		if (in_irqentry_text(entries[i])) {
-			/* Include the irqentry function into the stack. */
-			return i + 1;
-		}
-	}
-	return nr_entries;
-}
 
 static inline depot_stack_handle_t save_stack(gfp_t flags)
 {
@@ -105,25 +82,30 @@ EXPORT_SYMBOL(__kasan_check_write);
 #undef memset
 void *memset(void *addr, int c, size_t len)
 {
-	check_memory_region((unsigned long)addr, len, true, _RET_IP_);
+	if (!check_memory_region((unsigned long)addr, len, true, _RET_IP_))
+		return NULL;
 
 	return __memset(addr, c, len);
 }
 
+#ifdef __HAVE_ARCH_MEMMOVE
 #undef memmove
 void *memmove(void *dest, const void *src, size_t len)
 {
-	check_memory_region((unsigned long)src, len, false, _RET_IP_);
-	check_memory_region((unsigned long)dest, len, true, _RET_IP_);
+	if (!check_memory_region((unsigned long)src, len, false, _RET_IP_) ||
+	    !check_memory_region((unsigned long)dest, len, true, _RET_IP_))
+		return NULL;
 
 	return __memmove(dest, src, len);
 }
+#endif
 
 #undef memcpy
 void *memcpy(void *dest, const void *src, size_t len)
 {
-	check_memory_region((unsigned long)src, len, false, _RET_IP_);
-	check_memory_region((unsigned long)dest, len, true, _RET_IP_);
+	if (!check_memory_region((unsigned long)src, len, false, _RET_IP_) ||
+	    !check_memory_region((unsigned long)dest, len, true, _RET_IP_))
+		return NULL;
 
 	return __memcpy(dest, src, len);
 }
@@ -632,12 +614,21 @@ void kasan_free_shadow(const struct vm_struct *vm)
 #endif
 
 extern void __kasan_report(unsigned long addr, size_t size, bool is_write, unsigned long ip);
+extern bool report_enabled(void);
 
-void kasan_report(unsigned long addr, size_t size, bool is_write, unsigned long ip)
+bool kasan_report(unsigned long addr, size_t size, bool is_write, unsigned long ip)
 {
 	unsigned long flags = user_access_save();
-	__kasan_report(addr, size, is_write, ip);
+	bool ret = false;
+
+	if (likely(report_enabled())) {
+		__kasan_report(addr, size, is_write, ip);
+		ret = true;
+	}
+
 	user_access_restore(flags);
+
+	return ret;
 }
 
 #ifdef CONFIG_MEMORY_HOTPLUG
@@ -778,15 +769,17 @@ static int kasan_populate_vmalloc_pte(pte_t *ptep, unsigned long addr,
 	return 0;
 }
 
-int kasan_populate_vmalloc(unsigned long requested_size, struct vm_struct *area)
+int kasan_populate_vmalloc(unsigned long addr, unsigned long size)
 {
 	unsigned long shadow_start, shadow_end;
 	int ret;
 
-	shadow_start = (unsigned long)kasan_mem_to_shadow(area->addr);
+	if (!is_vmalloc_or_module_addr((void *)addr))
+		return 0;
+
+	shadow_start = (unsigned long)kasan_mem_to_shadow((void *)addr);
 	shadow_start = ALIGN_DOWN(shadow_start, PAGE_SIZE);
-	shadow_end = (unsigned long)kasan_mem_to_shadow(area->addr +
-							area->size);
+	shadow_end = (unsigned long)kasan_mem_to_shadow((void *)addr + size);
 	shadow_end = ALIGN(shadow_end, PAGE_SIZE);
 
 	ret = apply_to_page_range(&init_mm, shadow_start,
@@ -796,10 +789,6 @@ int kasan_populate_vmalloc(unsigned long requested_size, struct vm_struct *area)
 		return ret;
 
 	flush_cache_vmap(shadow_start, shadow_end);
-
-	kasan_unpoison_shadow(area->addr, requested_size);
-
-	area->flags |= VM_KASAN;
 
 	/*
 	 * We need to be careful about inter-cpu effects here. Consider:
@@ -843,10 +832,21 @@ int kasan_populate_vmalloc(unsigned long requested_size, struct vm_struct *area)
  * Poison the shadow for a vmalloc region. Called as part of the
  * freeing process at the time the region is freed.
  */
-void kasan_poison_vmalloc(void *start, unsigned long size)
+void kasan_poison_vmalloc(const void *start, unsigned long size)
 {
+	if (!is_vmalloc_or_module_addr(start))
+		return;
+
 	size = round_up(size, KASAN_SHADOW_SCALE_SIZE);
 	kasan_poison_shadow(start, size, KASAN_VMALLOC_INVALID);
+}
+
+void kasan_unpoison_vmalloc(const void *start, unsigned long size)
+{
+	if (!is_vmalloc_or_module_addr(start))
+		return;
+
+	kasan_unpoison_shadow(start, size);
 }
 
 static int kasan_depopulate_vmalloc_pte(pte_t *ptep, unsigned long addr,
@@ -948,6 +948,7 @@ void kasan_release_vmalloc(unsigned long start, unsigned long end,
 {
 	void *shadow_start, *shadow_end;
 	unsigned long region_start, region_end;
+	unsigned long size;
 
 	region_start = ALIGN(start, PAGE_SIZE * KASAN_SHADOW_SCALE_SIZE);
 	region_end = ALIGN_DOWN(end, PAGE_SIZE * KASAN_SHADOW_SCALE_SIZE);
@@ -970,9 +971,11 @@ void kasan_release_vmalloc(unsigned long start, unsigned long end,
 	shadow_end = kasan_mem_to_shadow((void *)region_end);
 
 	if (shadow_end > shadow_start) {
-		apply_to_page_range(&init_mm, (unsigned long)shadow_start,
-				    (unsigned long)(shadow_end - shadow_start),
-				    kasan_depopulate_vmalloc_pte, NULL);
+		size = shadow_end - shadow_start;
+		apply_to_existing_page_range(&init_mm,
+					     (unsigned long)shadow_start,
+					     size, kasan_depopulate_vmalloc_pte,
+					     NULL);
 		flush_tlb_kernel_range((unsigned long)shadow_start,
 				       (unsigned long)shadow_end);
 	}
