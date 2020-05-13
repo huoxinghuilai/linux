@@ -96,9 +96,8 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 						# .insn
 
 	kernel_entry_setup			# cpu specific setup
-						# 跳转至 init/main.c --> start_kenrel() 开始执行
 
-	setup_c0_status_pri
+	setup_c0_status_pri			# 设置 c0 寄存器状态
 
 	/* We might not get launched at the address the kernel is linked to,
 	   so we jump there.  */
@@ -147,13 +146,15 @@ dtb_found:					# 发现 dtb
 #endif
 
 	MTC0		zero, CP0_CONTEXT	# clear context register
-	PTR_LA		$28, init_thread_union
+						# 清空上下文寄存器
+	PTR_LA		$28, init_thread_union	# 获取 init_thread_union 结构体，MIPS架构中28号寄存器为 GP，全局指针寄存器
 	/* Set the SP after an empty pt_regs.  */
 	PTR_LI		sp, _THREAD_SIZE - 32 - PT_SIZE
 	PTR_ADDU	sp, $28
 	back_to_back_c0_hazard
 	set_saved_sp	sp, t0, t1
 	PTR_SUBU	sp, 4 * SZREG		# init stack pointer
+						# 初始栈顶指针
 
 #ifdef CONFIG_RELOCATABLE
 	/* Copy kernel and apply the relocations */
@@ -174,7 +175,7 @@ dtb_found:					# 发现 dtb
 	 */
 	jr.hb		v0
 #else  /* !CONFIG_RELOCATABLE */
-	j		start_kernel
+	j		start_kernel		# 跳转至 init/main.c --> start_kenrel() 开始执行
 #endif /* !CONFIG_RELOCATABLE */
 	END(kernel_entry)
 
