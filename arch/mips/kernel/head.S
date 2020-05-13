@@ -32,7 +32,7 @@
 	 * 64-bit addresses.  A full initialization of the CPU's status
 	 * register is done later in per_cpu_trap_init().
 	 */
-	.macro	setup_c0_status set clr
+	.macro	setup_c0_status set clr		# 宏定义函数: setup_c0_status(set, clr)
 	.set	push
 	mfc0	t0, CP0_STATUS
 	or	t0, ST0_CU0|\set|0x1f|\clr
@@ -43,19 +43,19 @@
 	.set	pop
 	.endm
 
-	.macro	setup_c0_status_pri
+	.macro	setup_c0_status_pri		# 宏定义函数: setup_c0_status_pri(void)
 #ifdef CONFIG_64BIT
-	setup_c0_status ST0_KX 0
+	setup_c0_status ST0_KX 0		# 执行 setup_c0_status(STO_KX, 0)
 #else
-	setup_c0_status 0 0
+	setup_c0_status 0 0			# 执行 setup_c0_status(0, 0)
 #endif
 	.endm
 
-	.macro	setup_c0_status_sec
+	.macro	setup_c0_status_sec		# 宏定义函数: setup_c0_status_sec(void)
 #ifdef CONFIG_64BIT
-	setup_c0_status ST0_KX ST0_BEV
+	setup_c0_status ST0_KX ST0_BEV		# 执行 setup_c0_status(ST0_KX, ST0_BEV)
 #else
-	setup_c0_status 0 ST0_BEV
+	setup_c0_status 0 ST0_BEV		# 执行 setup_c0_status(0, ST0_BEV)
 #endif
 	.endm
 
@@ -64,10 +64,12 @@
 	 * Reserved space for exception handlers.
 	 * Necessary for machines which link their kernels at KSEG0.
 	 */
-	.fill	0x400
+	.fill	0x400				# 预留异常处理空间
 #endif
 
-EXPORT(_stext)
+EXPORT(_stext)					# .global _stext
+						# _stext:
+						# 声明了全局变量 _stext
 
 #ifdef CONFIG_BOOT_RAW
 	/*
@@ -75,15 +77,26 @@ EXPORT(_stext)
 	 * kernel load address.	 This is needed because this platform does
 	 * not have a ELF loader yet.
 	 */
-FEXPORT(__kernel_entry)
+FEXPORT(__kernel_entry)				# .global __kernel_entry
+						# .type __kernel_entry @function
+						# __kernel_entry: .insn
+						# 声明了全局函数 __kernel_entry
 	j	kernel_entry
 #endif /* CONFIG_BOOT_RAW */
 
 	__REF
 
 NESTED(kernel_entry, 16, sp)			# kernel entry point
+						# .globl	kernel_entry;				
+						# .align	2;				
+						# .type	kernel_entry, @function;		
+						# .ent	kernel_entry, 0;			
+						# kernel_entry: .frame sp, 16, sp;		
+						# .cfi_startproc;				
+						# .insn
 
 	kernel_entry_setup			# cpu specific setup
+						# 跳转至 init/main.c --> start_kenrel() 开始执行
 
 	setup_c0_status_pri
 
@@ -112,9 +125,10 @@ NESTED(kernel_entry, 16, sp)			# kernel entry point
 	beq		a0, t1, dtb_found
 
 	li		t2, 0
-dtb_found:
+dtb_found:					# 发现 dtb
 #endif /* CONFIG_USE_OF */
 	PTR_LA		t0, __bss_start		# clear .bss
+						# 清空 BSS 段
 	LONG_S		zero, (t0)
 	PTR_LA		t1, __bss_stop - LONGSIZE
 1:
@@ -123,12 +137,13 @@ dtb_found:
 	bne		t0, t1, 1b
 
 	LONG_S		a0, fw_arg0		# firmware arguments
+						# 获取固件参数
 	LONG_S		a1, fw_arg1
 	LONG_S		a2, fw_arg2
 	LONG_S		a3, fw_arg3
 
 #ifdef CONFIG_USE_OF
-	LONG_S		t2, fw_passed_dtb
+	LONG_S		t2, fw_passed_dtb	# 获取 dtb 信息
 #endif
 
 	MTC0		zero, CP0_CONTEXT	# clear context register
